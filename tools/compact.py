@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tái cấu trúc dataset Parquet của dashboard — NHIỆM VỤ 4.  CHƯA CÓ LOGIC.
+"""Tái cấu trúc dataset Parquet của dashboard — NHIỆM VỤ 4.
 
 Hiện trạng: `data/gold_events/` gồm 5.000 file, mỗi file vài chục KB, không
 partition, thứ tự hàng ngẫu nhiên.
@@ -46,6 +46,7 @@ phải giảm, `files` phải giảm, và `result hash` phải GIỮ NGUYÊN.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 
 import duckdb
@@ -63,27 +64,46 @@ def main() -> int:
     n_src = len(list(SRC.glob("*.parquet")))
     print(f"  nguồn : {SRC}  ({n_src:,} file)")
 
-    # TODO(nhiệm vụ 4): hiện thực khung COPY ... TO ... ở phần docstring.
-    #
-    #   con.execute(f"""
-    #       copy (
-    #           select * from read_parquet('{SRC}/*.parquet')
-    #           order by ...
-    #       ) to '{DST}' (
-    #           format parquet,
-    #           partition_by (...),
-    #           overwrite_or_ignore,
-    #           row_group_size ...
-    #       )
-    #   """)
-    #
-    # Sau đó kiểm tra không mất hàng nào:
-    #
-    #   assert <số row dataset cũ> == <số row dataset mới>
+    if n_src == 0:
+        raise SystemExit("không có dữ liệu nguồn; chạy seed/generate.py --extra trước")
 
-    print("\n  tools/compact.py chưa được hiện thực — đây là nhiệm vụ 4.")
-    print("  Mở file này, đọc phần KHUNG THỰC HIỆN ở đầu file và điền vào TODO.")
-    print("  Hướng dẫn từng bước: GUIDE.md mục 4.\n")
+    # DST là dataset sinh lại hoàn toàn. Xoá phiên bản cũ để chạy compact nhiều
+    # lần vẫn cho đúng một layout, không giữ sót file từ lần chạy trước.
+    data_root = DATA.resolve()
+    dst_resolved = DST.resolve()
+    if dst_resolved.parent != data_root:
+        raise RuntimeError(f"đường dẫn đích không an toàn: {dst_resolved}")
+    if DST.exists():
+        shutil.rmtree(DST)
+
+    src_glob = (SRC / "*.parquet").as_posix()
+    dst_path = DST.as_posix()
+    con.execute(f"""
+        copy (
+            select *
+            from read_parquet('{src_glob}')
+            order by event_date, customer_name, event_time, event_id
+        ) to '{dst_path}' (
+            format parquet,
+            partition_by (event_date),
+            overwrite_or_ignore,
+            row_group_size 2048
+        )
+    """)
+
+    dst_glob = (DST / "**" / "*.parquet").as_posix()
+    n_old = con.execute(
+        f"select count(*) from read_parquet('{src_glob}')"
+    ).fetchone()[0]
+    n_new = con.execute(
+        f"select count(*) from read_parquet('{dst_glob}', hive_partitioning=true)"
+    ).fetchone()[0]
+    assert n_old == n_new, f"mất dữ liệu khi compact: {n_old:,} != {n_new:,}"
+
+    n_dst = len(list(DST.rglob("*.parquet")))
+    print(f"  đích  : {DST}  ({n_dst:,} file)")
+    print(f"  số hàng: {n_old:,} -> {n_new:,} (không đổi)\n")
+    con.close()
     return 0
 
 
